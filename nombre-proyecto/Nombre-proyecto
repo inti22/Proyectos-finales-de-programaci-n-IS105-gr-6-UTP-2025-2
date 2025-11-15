@@ -1,0 +1,12 @@
+Presionan agregrar archivo
+Asignan el nombre de la carpeta asi: (carpeta/), el / indica que es una carpeta
+Asignan un nombre al archivo
+En la ventana inferior ponen un texto breve: (Proyecto de (nombre)- (nombre del juego))
+¿Cómo subir archivos delo proyecto dentro de su carpeta?
+1. Entra a la carpeta
+2. Clic en "agregar archivo" -> "subir archivos"
+3. Arrastra el archivo de racket (.rkt), imágenes o carpetas que usa el juego
+4. clic en Commit changes
+Nota importante:
+-Cada uno solo sube dentro de su carpeta
+-Nadie edita carpetas ajenas
