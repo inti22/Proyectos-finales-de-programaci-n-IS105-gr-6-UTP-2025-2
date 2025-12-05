@@ -1,0 +1,312 @@
+#lang racket
+(require 2htdp/image)
+(require 2htdp/universe)
+
+;; ----------------------------------------
+;; CONSTANTES
+;; ----------------------------------------
+
+(define WIDTH 1920)
+(define HEIGHT 1080)
+
+(define MAX-FOOD 6)
+(define PENDING_TICKS 4)
+
+;; Sprites
+(define FISH-SMALL (scale 0.12 (bitmap "fish-right.png")))
+(define FISH-SMALL-L (scale 0.12 (bitmap "fish-left.png")))
+
+(define FOOD-SPRITE (circle 6 "solid" "green"))
+(define ENEMY-SPRITE (triangle 35 "solid" "red"))
+
+;; Fondo
+(define BACKGROUND (scale/xy (/ WIDTH 1425) (/ HEIGHT 835) (bitmap "ocean-bg.png")))
+
+;; ----------------------------------------
+;; STRUCTS
+;; ----------------------------------------
+
+(struct fish (x y vx vy size facing) #:transparent)
+(struct food (id x y vx direction) #:transparent)
+(struct enemy (x y vx vy) #:transparent)
+
+(struct world (fish foods enemies score alive?
+                 pending-eat-id pending-ticks next-food-id) #:transparent)
+
+;; ----------------------------------------
+;; RENDER PEZ
+;; ----------------------------------------
+
+(define (render-fish f)
+  (scale (/ (fish-size f) 20)
+         (if (equal? (fish-facing f) 'right)
+             FISH-SMALL
+             FISH-SMALL-L)))
+
+;; ----------------------------------------
+;; DISTANCIA
+;; ----------------------------------------
+
+(define (dist x1 y1 x2 y2)
+  (sqrt (+ (sqr (- x1 x2))
+           (sqr (- y1 y2)))))
+
+;; ----------------------------------------
+;; GENERAR COSAS
+;; ----------------------------------------
+
+(define (spawn-food id)
+  (define direction (if (< (random 2) 1) 'left 'right))
+  (define start-x (if (equal? direction 'left) WIDTH 0))
+  (define speed (+ 1 (random 3)))
+  (food id 
+        start-x
+        (+ 50 (random (- HEIGHT 100)))
+        (if (equal? direction 'left) (- speed) speed)
+        direction))
+
+(define (spawn-enemy)
+  (enemy (random WIDTH)
+         (random HEIGHT)
+         (- (random 4) 2)
+         (- (random 4) 2)))
+
+(define (spawn-food-if-needed foods next-id)
+  (if (< (length foods) MAX-FOOD)
+      (cons (spawn-food next-id) foods)
+      foods))
+
+(define (spawn-enemy-if-needed enemies)
+  (if (< (length enemies) 3)
+      (cons (spawn-enemy) enemies)
+      enemies))
+
+;; ----------------------------------------
+;; MOVIMIENTO PEZ
+;; ----------------------------------------
+
+(define (move-fish f)
+  (fish (clamp (+ (fish-x f) (fish-vx f)) 0 WIDTH)
+        (clamp (+ (fish-y f) (fish-vy f)) 0 HEIGHT)
+        (fish-vx f)
+        (fish-vy f)
+        (fish-size f)
+        (fish-facing f)))
+
+(define (clamp val lo hi)
+  (max lo (min hi val)))
+
+;; ----------------------------------------
+;; MOVIMIENTO ENEMIGOS
+;; ----------------------------------------
+
+(define (move-food fd)
+  (define new-x (+ (food-x fd) (food-vx fd)))
+  ;; Si la comida sale de la pantalla, reaparece del otro lado
+  (if (or (< new-x -50) (> new-x (+ WIDTH 50)))
+      #f  ; marca para eliminar
+      (food (food-id fd)
+            new-x
+            (food-y fd)
+            (food-vx fd)
+            (food-direction fd))))
+
+(define (move-enemy e)
+  (define new-x (+ (enemy-x e) (enemy-vx e)))
+  (define new-y (+ (enemy-y e) (enemy-vy e)))
+  (define new-vx (if (or (< new-x 0) (> new-x WIDTH))
+                     (- (enemy-vx e))
+                     (enemy-vx e)))
+  (define new-vy (if (or (< new-y 0) (> new-y HEIGHT))
+                     (- (enemy-vy e))
+                     (enemy-vy e)))
+  (enemy (clamp new-x 0 WIDTH)
+         (clamp new-y 0 HEIGHT)
+         new-vx
+         new-vy))
+
+;; ----------------------------------------
+;; COMER
+;; ----------------------------------------
+
+(define (detect-food-collision f foods)
+  (define (close? fd)
+    (< (dist (fish-x f) (fish-y f)
+             (food-x fd) (food-y fd))
+       (+ 12 (* 0.4 (fish-size f)))))
+  (let ([hit (filter close? foods)])
+    (if (empty? hit) #f (food-id (first hit)))))
+
+;; enemigo mata
+(define (fish-hit-enemies? f enemies)
+  (ormap
+   (λ (e)
+     (< (dist (fish-x f) (fish-y f)
+              (enemy-x e) (enemy-y e))
+        22))
+   enemies))
+
+;; ----------------------------------------
+;; PROCESO EAT BUFFER
+;; ----------------------------------------
+
+(define (process-pending-eat w)
+  (define pid (world-pending-eat-id w))
+  (if (not pid)
+      w
+      (let* ([foods (world-foods w)]
+             [remaining (filter (λ (fd) (not (= (food-id fd) pid))) foods)]
+             [ate (- (length foods) (length remaining))]
+             [f (world-fish w)]
+             [new-fish (fish (fish-x f)
+                             (fish-y f)
+                             (fish-vx f)
+                             (fish-vy f)
+                             (+ (fish-size f) (* ate 2)) ; CRECIMIENTO más visible
+                             (fish-facing f))])
+        (world new-fish
+               remaining
+               (world-enemies w)
+               (+ (world-score w) ate)
+               (world-alive? w)
+               #f
+               0
+               (world-next-food-id w)))))
+
+;; ----------------------------------------
+;; TICK
+;; ----------------------------------------
+
+(define (tick w)
+  (if (not (world-alive? w))
+      w
+      (let* ([pending-id (world-pending-eat-id w)]
+             [pending-t (world-pending-ticks w)]
+             
+             ;; procesar buffer
+             [w2 (if (and pending-id (> pending-t 0))
+                     (let ([new-t (sub1 pending-t)])
+                       (if (= new-t 0)
+                           (process-pending-eat (struct-copy world w [pending-ticks 0]))
+                           (struct-copy world w [pending-ticks new-t])))
+                     w)]
+
+             ;; mover cosas
+             [f (move-fish (world-fish w2))]
+             [moved-foods-raw (map move-food (world-foods w2))]
+             [moved-foods (filter (λ (fd) fd) moved-foods-raw)] ; eliminar las que salieron
+             [moved-enemies (map move-enemy (world-enemies w2))]
+
+             ;; colisiones
+             [maybe-id (if (not (world-pending-eat-id w2))
+                           (detect-food-collision f moved-foods)
+                           #f)]
+
+             ;; spawns
+             [foods2 (spawn-food-if-needed moved-foods
+                                           (world-next-food-id w2))]
+             [next-id (if (> (length foods2) (length moved-foods))
+                          (+ (world-next-food-id w2) 1)
+                          (world-next-food-id w2))]
+             [enemies2 (spawn-enemy-if-needed moved-enemies)]
+
+             [dead? (fish-hit-enemies? f enemies2)]
+
+             [base (world f foods2 enemies2
+                          (world-score w2)
+                          (not dead?)
+                          (world-pending-eat-id w2)
+                          (world-pending-ticks w2)
+                          next-id)]
+
+             [final (if (and maybe-id (not (world-pending-eat-id w2)))
+                        (struct-copy world base
+                          [pending-eat-id maybe-id]
+                          [pending-ticks PENDING_TICKS])
+                        base)])
+
+        (if dead?
+            (struct-copy world final [alive? #f])
+            final))))
+
+;; ----------------------------------------
+;; DIBUJO
+;; ----------------------------------------
+
+(define (draw-world w)
+  ;; Crear fondo
+  (define base-scene (place-image BACKGROUND 
+                                  (/ WIDTH 2) 
+                                  (/ HEIGHT 2) 
+                                  (empty-scene WIDTH HEIGHT)))
+  
+  ;; Dibujar comida
+  (define scene-with-food
+    (foldl (λ (fd scene)
+             (place-image FOOD-SPRITE (food-x fd) (food-y fd) scene))
+           base-scene
+           (world-foods w)))
+  
+  ;; Dibujar enemigos
+  (define scene-with-enemies
+    (foldl (λ (e scene)
+             (place-image ENEMY-SPRITE (enemy-x e) (enemy-y e) scene))
+           scene-with-food
+           (world-enemies w)))
+  
+  ;; Dibujar pez
+  (define f (world-fish w))
+  (define scene-with-fish 
+    (place-image (render-fish f) (fish-x f) (fish-y f) scene-with-enemies))
+  
+  ;; Agregar marcador de puntuación
+  (place-image (text (string-append "Score: " (number->string (world-score w))) 
+                     20 "white")
+               70 30 
+               scene-with-fish))
+
+;; ----------------------------------------
+;; INPUT
+;; ----------------------------------------
+
+(define (handle-key w k)
+  (define f (world-fish w))
+  (cond
+    [(key=? k "up")    (struct-copy world w [fish (fish (fish-x f) (fish-y f) (fish-vx f) -4 (fish-size f) (fish-facing f))])]
+    [(key=? k "down")  (struct-copy world w [fish (fish (fish-x f) (fish-y f) (fish-vx f)  4 (fish-size f) (fish-facing f))])]
+    [(key=? k "left")  (struct-copy world w [fish (fish (fish-x f) (fish-y f) -4 (fish-vy f) (fish-size f) 'left)])]
+    [(key=? k "right") (struct-copy world w [fish (fish (fish-x f) (fish-y f)  4 (fish-vy f) (fish-size f) 'right)])]
+    [else w]))
+
+(define (handle-key-release w k)
+  (define f (world-fish w))
+  (cond
+    [(or (key=? k "up") (key=? k "down"))
+     (struct-copy world w [fish (fish (fish-x f) (fish-y f) (fish-vx f) 0 (fish-size f) (fish-facing f))])]
+    [(or (key=? k "left") (key=? k "right"))
+     (struct-copy world w [fish (fish (fish-x f) (fish-y f) 0 (fish-vy f) (fish-size f) (fish-facing f))])]
+    [else w]))
+
+;; ----------------------------------------
+;; MUNDO INICIAL
+;; ----------------------------------------
+
+(define initial-world
+  (world (fish 400 300 0 0 6 'right) ; PEZ PEQUEÑO
+         '()
+         '()
+         0
+         #t
+         #f
+         0
+         0))
+
+;; ----------------------------------------
+;; BIG-BANG
+;; ----------------------------------------
+
+(big-bang initial-world
+  [to-draw draw-world]
+  [on-tick tick]
+  [on-key handle-key]
+  [on-release handle-key-release])
